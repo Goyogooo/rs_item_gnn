@@ -27,17 +27,17 @@ movies  = pd.read_csv(
 # 2) 生成连号映射
 unique_u = sorted(ui.uid.unique())
 unique_i = sorted(mid_idx.mid.unique())
-u2nid    = {u: idx for idx, u in enumerate(unique_u)}
-i2nid    = {i: idx for idx, i in enumerate(unique_i)}
+u2nid    = {u: idx for idx, u in enumerate(unique_u)}# 生成用户id到节点id字典
+i2nid    = {i: idx for idx, i in enumerate(unique_i)}# 生成电影id到节点id字典
 num_users, num_items = len(u2nid), len(i2nid)
 
 # 3) 重映射交互
-ui['uid_n'] = ui.uid.map(u2nid)
-ui['mid_n'] = ui.mid.map(i2nid)
+ui['uid_n'] = ui.uid.map(u2nid)# 交互数据中用户id映射对应节点id
+ui['mid_n'] = ui.mid.map(i2nid)# 交互数据中电影id映射对应节点id
 
-# 4) 对齐 item_feat 到新的 item ID
+# 4) 对齐 item_feat 到新的 节点ID（电影id映射）
 feat_all = np.load(feat_path)          # shape = (原 num_items, feat_dim)
-mid_idx['mid_n'] = mid_idx.mid.map(i2nid)
+mid_idx['mid_n'] = mid_idx.mid.map(i2nid)# 电影特征数据中电影id映射到对应节点id
 mid_idx = mid_idx.sort_values('mid_n').reset_index(drop=True)
 feat     = feat_all[mid_idx.index]     # shape = (num_items, feat_dim)
 
@@ -46,16 +46,19 @@ k = 20
 index = faiss.IndexFlatIP(feat.shape[1])
 index.add(feat.astype('float32'))
 _, nbr = index.search(feat.astype('float32'), k+1)
-ii_src = np.repeat(np.arange(num_items), k)
-ii_dst = nbr[:, 1:].reshape(-1)
+# nbr 是一个形状为 (num_items, k+1) 的数组，
+# 其中每行包含 每个物品最相似的 k+1 个物品的索引。
+# 第一列通常是物品本身（即与自己最相似），接下来的 k 列是最相似的 k 个物品。
+ii_src = np.repeat(np.arange(num_items), k)# 源节点num_items * k
+ii_dst = nbr[:, 1:].reshape(-1)# 相似物品节点num_items * k
 
 # 6) 构建属性视图（item–has–attr, attr–rev_has–item）
-all_genres = sorted({g for gs in movies.genres.str.split("|") for g in gs})
-attr2nid   = {g: i for i, g in enumerate(all_genres)}
+all_genres = sorted({g for gs in movies.genres.str.split("|") for g in gs}) #  电影的类别字符串列表，按字母排序
+attr2nid   = {g: i for i, g in enumerate(all_genres)} #  将每个电影类型映射到节点ID，形成字典
 num_attrs  = len(all_genres)
 
-edges_ia_src = []
-edges_ia_dst = []
+edges_ia_src = [] # 保存源节点，物品节点Id
+edges_ia_dst = [] # 保存目的节点，属性节点Id
 for _, row in movies.iterrows():
     orig_mid = row.mid
     if orig_mid not in i2nid:
@@ -76,7 +79,7 @@ data['attr'].num_nodes  = num_attrs
 src = torch.LongTensor(ui.uid_n.values)
 dst = torch.LongTensor(ui.mid_n.values)
 data['user', 'rates',  'item'].edge_index     = torch.stack([src, dst], dim=0)
-data['item', 'rev_rates', 'user'].edge_index  = torch.stack([dst, src], dim=0)
+data['item', 'rev_rates', 'user'].edge_index  = torch.stack([dst, src], dim=0)# 物品→用户
 
 # 物品→物品 相似边
 data['item', 'sim', 'item'].edge_index = torch.stack([
@@ -89,7 +92,7 @@ data['item','has','attr'].edge_index     = torch.stack([
     torch.LongTensor(edges_ia_src),
     torch.LongTensor(edges_ia_dst)
 ], dim=0)
-data['attr','rev_has','item'].edge_index = torch.stack([
+data['attr','rev_has','item'].edge_index = torch.stack([# 属性→物品
     torch.LongTensor(edges_ia_dst),
     torch.LongTensor(edges_ia_src)
 ], dim=0)

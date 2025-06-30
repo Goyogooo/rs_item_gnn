@@ -7,7 +7,8 @@ ROOT  = "data/ml-1m"
 CACHE = f"{ROOT}/cache"
 os.makedirs(CACHE, exist_ok=True)
 
-# 1) Ratings（二元化正反馈：rating>=3）
+# 1) 二元化正反馈
+# 读取评分数据，["uid","mid","rate","ts"]
 ratings = pd.read_csv(
     f"{ROOT}/ratings.dat",
     sep="::",
@@ -15,7 +16,7 @@ ratings = pd.read_csv(
     names=["uid","mid","rate","ts"],
     encoding="latin-1"
 )
-# 只保留 >=3 的正反馈，并按时间戳排序
+# 只保留 >=3 的正反馈，并按时间戳排序，认为这些是用户的正反馈。评分低于3的则被忽略。
 ratings = ratings[ratings.rate >= 3].sort_values("ts").reset_index(drop=True)
 
 # 2) Leave-One-Out 划分：
@@ -24,13 +25,13 @@ def loo_split(df):
     train, valid, test = [], [], []
     for uid, grp in df.groupby("uid"):
         mids = grp.mid.values.tolist()
-        if len(mids) < 3:
-            train += [(uid, m) for m in mids[:-1]]
-            test.append((uid, mids[-1]))
-        else:
-            train += [(uid, m) for m in mids[:-2]]
-            valid.append((uid, mids[-2]))
-            test.append((uid, mids[-1]))
+        if len(mids) < 3:# 该用户的交互少于3条
+            train += [(uid, m) for m in mids[:-1]]# 将除最后一条外的所有电影加入训练集
+            test.append((uid, mids[-1]))# 最后一条电影加入测试集
+        else:# 如果该用户的交互大于等于3条
+            train += [(uid, m) for m in mids[:-2]]# 将除最后两条外的所有电影加入训练集
+            valid.append((uid, mids[-2]))# 倒数第二条电影加入验证集
+            test.append((uid, mids[-1])) # 最后一条电影加入测试集
     return (
         pd.DataFrame(train, columns=["uid","mid"]),
         pd.DataFrame(valid, columns=["uid","mid"]),

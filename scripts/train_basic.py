@@ -27,11 +27,11 @@ class CIGHCL_Heterarchical(nn.Module):
         self.args = args
 
         # 投影 & 嵌入
-        self.lin_item = nn.Linear(feat_dim, hidden)
-        self.user_emb = nn.Embedding(num_users, hidden)
+        self.lin_item = nn.Linear(feat_dim, hidden) # 用于将物品特征从 feat_dim 投影到隐藏空间（hidden）
+        self.user_emb = nn.Embedding(num_users, hidden) # 为每个用户和属性（如电影类型）分配嵌入向量。
         self.attr_emb = nn.Embedding(num_attrs, hidden)
 
-        # 局部层
+        # 局部层图卷积层
         self.convs_ui = nn.ModuleList([
             HeteroConv({
                 ('user','rates','item'):     SAGEConv((hidden,hidden), hidden),
@@ -42,7 +42,7 @@ class CIGHCL_Heterarchical(nn.Module):
             for _ in range(num_layers)
         ])
 
-        # 内容视图多层
+        # 内容视图图卷积层
         if not args.no_content:
             self.convs_ii = nn.ModuleList([
                 HeteroConv({
@@ -54,7 +54,7 @@ class CIGHCL_Heterarchical(nn.Module):
         else:
             self.convs_ii = None
 
-        # 属性视图多层：item↔attr
+        # 属性视图图卷积层：item↔attr
         if not args.no_attr:
             self.convs_ia = nn.ModuleList([
                 HeteroConv({
@@ -68,7 +68,11 @@ class CIGHCL_Heterarchical(nn.Module):
         else:
             self.convs_ia = None
 
-        self.alpha = nn.Parameter(torch.zeros(3))
+        # self.alpha = nn.Parameter(torch.zeros(3)) 
+        self.alpha = nn.Parameter(torch.randn(3) * 0.1)
+        # 创建一个 长度为 3 的张量，值全为 0；
+
+        # 将它注册为 可学习参数，可以通过 loss.backward() 自动更新
         
         # 对比投影头
         self.proj = nn.Sequential(
@@ -86,7 +90,7 @@ class CIGHCL_Heterarchical(nn.Module):
         for conv in self.convs_ui:
             h_ui = conv(h_ui, edges)
             h_ui = {k:F.relu(v) for k,v in h_ui.items()}
-        h_ui_item = h_ui['item']
+        h_ui_item = h_ui['item']# 得到在交互视图下聚合后的 item 表示：h_ui_item
 
         if self.convs_ii is not None:
             h_ii = {'item': x_item}
@@ -108,12 +112,17 @@ class CIGHCL_Heterarchical(nn.Module):
 
         # —— 跨视图层：可学习门控融合
         w = torch.softmax(self.alpha, dim=0)
-        h_fused = w[0]*h_ui_item + w[1]*h_ii_item + w[2]*h_ia_item
+        if self.convs_ii is None:
+            w[1] = 0
+        if self.convs_ia is None:
+            w[2] = 0
+        w = w / w.sum()
+        h_fused = w[0]*h_ui_item + w[1]*h_ii_item + w[2]*h_ia_item# 最终融合表示 h_fused
 
         return h_fused, h_ui_item, h_ii_item, h_ia_item, w
 
-    def loss_contrast(self, hi, hc):
-        zi = self.proj(hi); zc = self.proj(hc)
+    def loss_contrast(self, hi, hc):# hi, hc 是两个视图下的 item 表示
+        zi = self.proj(hi); zc = self.proj(hc)#  映射到对比空间
         sim = zi@zc.t() / (zi.norm(1)*zc.norm(1).t())
         labels = torch.arange(sim.size(0), device=sim.device)
         return F.cross_entropy(sim, labels)
@@ -241,18 +250,28 @@ def train():
                 cand = pos_dict.get(u, [])
                 if not cand:
                     continue
-                u_batch.append(u)
-                pos.append(random.choice(cand))
-                neg.append(random.choice(all_items))
+                p = random.choice(cand)  # 选一个正样本
+
+                neg_items = set()
+                attempts = 0
+                while len(neg_items) < 5 and attempts < 100:
+                    ni = random.randint(0, data['item'].num_nodes - 1)
+                    if ni != p and ni not in cand:
+                        neg_items.add(ni)
+                    attempts += 1
+
+                # 展平为多个三元组
+                for ni in neg_items:
+                    u_batch.append(u)
+                    pos.append(p)
+                    neg.append(ni)
+
             if not u_batch:
                 continue
             
-
             h_fused, h_ui, h_ii, h_ia , w= model(data)
-            view_weights.append(w.detach().cpu().numpy())
             optimizer.zero_grad()
             
-
             # BPR 损失
             u_emb   = model.user_emb(torch.tensor(u_batch, device=device))
             pos_emb = h_fused[pos]
@@ -260,11 +279,13 @@ def train():
             loss_bpr = bpr_loss(u_emb, pos_emb, neg_emb)
 
             # 对比损失
-            loss_c1 = model.loss_contrast(h_ui, h_ii)
-            loss_c2 = model.loss_contrast(h_ui, h_ia)
-            loss_con = LAMBDA * (loss_c1 + loss_c2)
+            loss_con = 0
+            if model.convs_ii is not None:
+                loss_con += model.loss_contrast(h_ui, h_ii)
+            if model.convs_ia is not None:
+                loss_con += model.loss_contrast(h_ui, h_ia)
 
-            loss = loss_bpr + loss_con
+            loss = loss_bpr + LAMBDA * loss_con
             loss.backward()
             optimizer.step()
             total_loss += loss.item() * len(u_batch)
